@@ -17,9 +17,8 @@
 #include <pthread.h>      
 
 #include <SDL.h>
-#include <SDL_net.h>
+//#include <SDL_opengl.h>
 #include "glad/glad.h"
-#include <SDL_opengl.h>
 
 #include "args.h"
 
@@ -114,8 +113,6 @@ serve1(int port)
 	return -1;
 }
 
-uint32 screenmodes[2] = { 0, SDL_WINDOW_FULLSCREEN_DESKTOP };
-
 void    
 printlog(GLuint object)
 {
@@ -200,6 +197,16 @@ exit(1);
 	return program;
 }
 
+float sizefoo = 0.005f;
+float intfoo = 1.0f;
+int scalefoo = 0;
+int xxfoo = 8;
+
+float maxsz = 0.0055f;
+float minsz = 0.0018f;
+float maxbr = 1.00f;
+float minbr = 0.25f;
+
 void
 draw(void)
 {
@@ -209,7 +216,7 @@ draw(void)
 
 	/* draw white phosphor */
 	glEnable(GL_BLEND);
-	glBlendEquation(GL_MAX);
+//	glBlendEquation(GL_MAX);
 	glBlendFunc(GL_ONE, GL_ONE);
 
 	glBindFramebuffer(GL_FRAMEBUFFER, whiteFBO);
@@ -217,11 +224,27 @@ draw(void)
 	glUseProgram(point_program);
         int coord = glGetUniformLocation(point_program, "coord");
         int age = glGetUniformLocation(point_program, "age");
+        int intensity = glGetUniformLocation(point_program, "intensity");
 
 	for(int i = 0; i < npoints; i++) {
 		float x = (float)(points[i].x+BORDER)/BWIDTH;
 		float y = (float)(points[i].y+BORDER)/BHEIGHT;
-		glUniform3f(coord, x*2-1.0f, y*2-1.0f, 0.005f);
+// teco uses 3
+// spacewar uses 4
+// DDT uses 7
+		float sz = minsz + (maxsz-minsz)*(points[i].i/7.0f);
+		float br = minbr + (maxbr-minbr)*(points[i].i/7.0f);
+
+//		glUniform3f(coord, x*2-1.0f, y*2-1.0f, 0.005f);
+//		glUniform3f(coord, x*2-1.0f, y*2-1.0f, 0.003f);
+//		glUniform3f(coord, x*2-1.0f, y*2-1.0f, sz);
+
+		glUniform3f(coord, x*2-1.0f, y*2-1.0f, sz);
+		glUniform1f(intensity, br);
+
+//		glUniform3f(coord, x*2-1.0f, y*2-1.0f, sizefoo);
+//		glUniform1f(intensity, intfoo);
+
 		glUniform1f(age, points[i].time/50000.0f);
 		glDrawArrays(GL_TRIANGLES, 0, 6);
 	}
@@ -269,23 +292,26 @@ draw(void)
 }
 
 #ifdef GLES
-#define glslversion "#version 310 es\n"
-#define precision "precision highp float; precision highp int;\n"
-#define outcolor "out vec4 fragColor;\n"
-#define output "fragColor = color;\n"
+#define glslheader "#version 100\nprecision highp float; precision highp int;\n" \
+	"#define VSIN attribute\n" \
+	"#define VSOUT varying\n" \
+	"#define FSIN varying\n"
+#define outcolor
+#define output "gl_FragColor = color;\n"
 #else
-#define glslversion "#version 130\n"
-#define precision
+#define glslheader "#version 130\n" \
+	"#define VSIN in\n" \
+	"#define VSOUT out\n" \
+	"#define FSIN in\n"
 #define outcolor
 #define output "gl_FragColor = color;\n"
 #endif
 
 const char *vs_src =
-glslversion
-precision
-"in vec2 in_pos;\n"
-"in vec2 in_uv;\n"
-"out vec2 v_uv;\n"
+glslheader
+"VSIN vec2 in_pos;\n"
+"VSIN vec2 in_uv;\n"
+"VSOUT vec2 v_uv;\n"
 "void main()\n"
 "{\n"
 "	v_uv = in_uv;\n"
@@ -293,10 +319,9 @@ precision
 "}\n";
 
 const char *fs_src = 
-glslversion
-precision
+glslheader
 outcolor
-"in vec2 v_uv;\n"
+"FSIN vec2 v_uv;\n"
 "uniform sampler2D tex0;\n"
 "void main()\n"
 "{\n"
@@ -306,12 +331,11 @@ output
 "}\n";
 
 const char *point_vs_src =
-glslversion
-precision
-"in vec2 in_pos;\n"
-"in vec2 in_uv;\n"
-"out vec2 v_uv;\n"
-"out float v_fade;\n"
+glslheader
+"VSIN vec2 in_pos;\n"
+"VSIN vec2 in_uv;\n"
+"VSOUT vec2 v_uv;\n"
+"VSOUT float v_fade;\n"
 "uniform vec3 coord;\n"
 "uniform float age;\n"
 "#define scl coord.z\n"
@@ -323,26 +347,26 @@ precision
 "}\n";
 
 const char *point_fs_src = 
-glslversion
-precision
+glslheader
 outcolor
-"in vec2 v_uv;\n"
-"in float v_fade;\n"
+"FSIN vec2 v_uv;\n"
+"FSIN float v_fade;\n"
+"uniform float intensity;\n"
 "void main()\n"
 "{\n"
-"	float dist = pow(length(v_uv*2.0 - 1.0), 2);\n"
-"	float intens = clamp(1.0-dist, 0.0, 1.0);\n"
+"	float dist = pow(length(v_uv*2.0 - 1.0), 2.0);\n"
+"	float intens = clamp(1.0-dist, 0.0, 1.0)*intensity;\n"
 "	vec4 color = vec4(0);\n"
 "	color.x = intens*v_fade;\n"
 "	color.y = intens;\n"
+"	color.z = 1.0;\n"
 output
 "}\n";
 
 const char *excite_fs_src = 
-glslversion
-precision
+glslheader
 outcolor
-"in vec2 v_uv;\n"
+"FSIN vec2 v_uv;\n"
 "uniform sampler2D tex0;\n"
 "uniform sampler2D tex1;\n"
 "void main()\n"
@@ -350,16 +374,15 @@ outcolor
 "	vec2 uv = vec2(v_uv.x, v_uv.y);\n"
 "	vec4 white = texture2D(tex0, uv);\n"
 "	vec4 yellow = texture2D(tex1, uv);\n"
-"	vec4 color = max(vec4(white.y), 0.987*yellow);\n"
-"	color = floor(color*255)/255;\n"
+"	vec4 color = max(vec4(white.y*white.z), 0.987*yellow);\n"
+"	color = floor(color*255.0)/255.0;\n"
 output
 "}\n";
 
 const char *combine_fs_src = 
-glslversion
-precision
+glslheader
 outcolor
-"in vec2 v_uv;\n"
+"FSIN vec2 v_uv;\n"
 "uniform sampler2D tex0;\n"
 "uniform sampler2D tex1;\n"
 "void main()\n"
@@ -372,8 +395,8 @@ outcolor
 "	vec4 white = texture2D(tex0, uv);\n"
 "	vec4 yellow = texture2D(tex1, uv);\n"
 "	vec4 yel = mix(yphos2, yphos1, yellow.x);\n"
-"	float a = 0.663 * (yel.a + (1-cos(3.141569*yel.a))/2)/2;\n"
-"	vec4 color = bphos1*white.x + yel*a;\n"
+"	float a = 0.663 * (yel.a + (1.0-cos(3.141569*yel.a))/2.0)/2.0;\n"
+"	vec4 color = bphos1*white.x*white.z + yel*a;\n"
 output
 "}\n";
 
@@ -391,11 +414,11 @@ makeFBO(GLuint *fbo, GLuint *tex)
 {
 	glGenTextures(1, tex);
 	glBindTexture(GL_TEXTURE_2D, *tex);
-	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, BWIDTH, BHEIGHT, 0, GL_RGBA, GL_UNSIGNED_BYTE, nil);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, BWIDTH, BHEIGHT, 0, GL_RGBA, GL_UNSIGNED_BYTE, nil);
 	texDefaults();
 	glGenFramebuffers(1, fbo);
 	glBindFramebuffer(GL_FRAMEBUFFER, *fbo);
-	glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, *tex, 0);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, *tex, 0);
 }
 
 void
@@ -437,8 +460,8 @@ initGL(void)
 		{ -1.0f, 1.0f,		0.0f, 1.0f },
 	};
 	GLuint stride = sizeof(struct Vertex);
-	glGenVertexArrays(1, &vao);
-	glBindVertexArray(vao);
+//	glGenVertexArrays(1, &vao);
+//	glBindVertexArray(vao);
 	glGenBuffers(1, &vbo);
 	glBindBuffer(GL_ARRAY_BUFFER, vbo);
 	glBufferData(GL_ARRAY_BUFFER, sizeof(screenquad), screenquad, GL_STATIC_DRAW);
@@ -447,6 +470,53 @@ initGL(void)
 	glEnableVertexAttribArray(1);
         glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, stride, 0);
         glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, stride, (void*)(uintptr_t)offsetof(struct Vertex, u));
+}
+
+uint32 screenmodes[2] = { 0, SDL_WINDOW_FULLSCREEN_DESKTOP };
+int fullscreen;
+
+void
+keydown(SDL_Keysym keysym)
+{
+	if(keysym.scancode == SDL_SCANCODE_F11){
+		fullscreen = !fullscreen;
+		SDL_SetWindowFullscreen(window, screenmodes[fullscreen]);
+	}
+	if(keysym.scancode == SDL_SCANCODE_ESCAPE)
+		exit(0);
+
+	switch(keysym.scancode) {
+	case SDL_SCANCODE_UP:
+		sizefoo += 0.0001f;
+		printf("sz %g\n", sizefoo);
+		break;
+	case SDL_SCANCODE_DOWN:
+		sizefoo -= 0.0001f;
+		printf("sz %g\n", sizefoo);
+		break;
+
+	case SDL_SCANCODE_LEFT:
+		intfoo -= 0.01f;
+		printf("int %g\n", intfoo);
+		break;
+	case SDL_SCANCODE_RIGHT:
+		intfoo += 0.01f;
+		printf("int %g\n", intfoo);
+		break;
+
+	case SDL_SCANCODE_S:
+		scalefoo = (scalefoo+1)%3;
+		break;
+	case SDL_SCANCODE_R:
+		sizefoo = 0.005f;
+		intfoo = 1.0f;
+		scalefoo = 0;
+		break;
+
+	case SDL_SCANCODE_X:
+		xxfoo = (xxfoo+1)%9;
+		break;
+	}
 }
 
 void
@@ -523,9 +593,10 @@ readthread(void *args)
 
 		if(x || y || intensity) {
 			Point *np = &newpoints[nnewpoints++];
-			np->x = x;
-			np->y = y;
+			np->x = x>>scalefoo;
+			np->y = y>>scalefoo;
 			np->i = intensity;
+if(xxfoo != 8) np->i = xxfoo;
 			np->time = time;
 		}
 
@@ -538,6 +609,23 @@ readthread(void *args)
 		}
 	}
 	exit(0);
+}
+
+int penx;
+int peny;
+int pendown;
+
+void
+updatepen(void)
+{
+	uint32 cmd;
+	cmd = 0xFF<<24;
+	cmd |= pendown << 20;
+// TODO: scaling
+	cmd |= penx << 10;
+	cmd |= 1023-peny;
+	write(netfd, &cmd, 4);
+//	printf("%d %d %d\n", penx, peny, pendown);
 }
 
 void
@@ -564,8 +652,8 @@ main(int argc, char *argv[])
 #ifdef GLES
 	SDL_GL_SetAttribute(SDL_GL_CONTEXT_FLAGS, 0);
 	SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
-	SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
-	SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 1);
+	SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 2);
+	SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
 #else
 	SDL_GL_SetAttribute(SDL_GL_CONTEXT_FLAGS, 0);
 	SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
@@ -577,7 +665,11 @@ main(int argc, char *argv[])
 	SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
 	SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
 	SDL_WindowFlags window_flags = (SDL_WindowFlags)(SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
-	window = SDL_CreateWindow("Knight TV", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, BWIDTH, BHEIGHT, window_flags);
+	window = SDL_CreateWindow("P7 sim", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, BWIDTH, BHEIGHT, window_flags);
+	if(window == nil) {
+		fprintf(stderr, "can't create window\n");
+		return 1;
+	}
 	SDL_GLContext gl_context = SDL_GL_CreateContext(window);
 	SDL_GL_MakeCurrent(window, gl_context);
 	SDL_GL_SetSwapInterval(1); // Enable vsync
@@ -585,7 +677,8 @@ main(int argc, char *argv[])
 	for(int i = 0; i < 1024*1024; i++)
 		indices[i] = -1;
 
-	gladLoadGL();
+//	gladLoadGL();
+	gladLoadGLES2Loader((GLADloadproc)SDL_GL_GetProcAddress);
 
 	initGL();
 
@@ -603,10 +696,29 @@ main(int argc, char *argv[])
 				break;
 			case SDL_KEYDOWN:
 //				keydown(event.key.keysym, event.key.repeat);
+				keydown(event.key.keysym);
 				break;
 			case SDL_KEYUP:
 //				keyup(event.key.keysym);
 				break;
+
+			case SDL_MOUSEMOTION:
+				penx = event.motion.x;
+				peny = event.motion.y;
+				if(pendown)
+					updatepen();
+				break;
+			case SDL_MOUSEBUTTONDOWN:
+				if(event.button.button == 1)
+					pendown = 1;
+				updatepen();
+				break;
+			case SDL_MOUSEBUTTONUP:
+				if(event.button.button == 1)
+					pendown = 0;
+				updatepen();
+				break;
+
 			case SDL_QUIT:
 				running = 0;
 				break;
