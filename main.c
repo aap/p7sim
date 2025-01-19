@@ -80,6 +80,40 @@ readn(int fd, void *data, int n)
 }
 
 int
+dial(const char *host, int port)
+{
+	char portstr[32];
+	int sockfd;
+	struct addrinfo *result, *rp, hints;
+
+	memset(&hints, 0, sizeof(hints));
+	hints.ai_family = AF_UNSPEC;
+	hints.ai_socktype = SOCK_STREAM;
+
+	snprintf(portstr, 32, "%d", port);
+	if(getaddrinfo(host, portstr, &hints, &result)){
+		perror("error: getaddrinfo");
+		return -1;
+	}
+
+	for(rp = result; rp; rp = rp->ai_next){
+		sockfd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
+		if(sockfd < 0)
+			continue;
+		if(connect(sockfd, rp->ai_addr, rp->ai_addrlen) >= 0)
+			goto win;
+		close(sockfd);
+	}
+	freeaddrinfo(result);
+	perror("error");
+	return -1;
+
+win:
+	freeaddrinfo(result);
+	return sockfd;
+}
+
+int
 serve1(int port)
 {
 	int sockfd, confd;
@@ -631,7 +665,7 @@ updatepen(void)
 void
 usage(void)
 {
-	fprintf(stderr, "usage: %s\n", argv0);
+	fprintf(stderr, "usage: %s [-p port] [server]\n", argv0);
 	exit(0);
 }
 
@@ -641,11 +675,21 @@ main(int argc, char *argv[])
 	pthread_t th;
 	SDL_Event event;
 	int running;
+	int port;
 
+	port = 3400;
 	ARGBEGIN{
+	case 'p':
+		port = atoi(EARGF(usage()));
+		break;
 	}ARGEND;
 
-	netfd = serve1(3400);
+	if(argc > 0)
+		netfd = dial(argv[0], port);
+	else
+		netfd = serve1(port);
+	if(netfd < 0)
+		return 1;
 
 	SDL_Init(SDL_INIT_EVERYTHING);
 
