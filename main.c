@@ -28,10 +28,17 @@ typedef uint16_t uint16;
 typedef uint8_t uint8;
 
 #define nil NULL
+#define nelem(a) (sizeof(a)/sizeof(*a))
 
 
+#if 1
 #define WIDTH 1024
 #define HEIGHT 1024
+#else
+// testing
+#define WIDTH 512
+#define HEIGHT 512
+#endif
 #define BORDER 2
 #define BWIDTH (WIDTH+2*BORDER)
 #define BHEIGHT (HEIGHT+2*BORDER)
@@ -40,16 +47,18 @@ char *argv0;
 
 SDL_Window *window;
 int netfd;
-uint32 userevent;
+int dbgflag;
 
 GLuint vbo;
-GLuint vao;
+GLuint pvbo;
 GLint program;
 GLint point_program, excite_program, combine_program;
 GLuint gltex;
 GLuint whiteTex, yellowTex[2];
 GLuint whiteFBO, yellowFBO[2];
 int flip;
+
+uint64 simtime, realtime;
 
 void
 panic(char *fmt, ...)
@@ -212,6 +221,8 @@ linkprogram(GLint vs, GLint fs)
 
 	glBindAttribLocation(program, 0, "in_pos");
 	glBindAttribLocation(program, 1, "in_uv");
+	glBindAttribLocation(program, 2, "in_params1");
+	glBindAttribLocation(program, 3, "in_params2");
 
 	glAttachShader(program, vs);
 	glAttachShader(program, fs);
@@ -241,10 +252,120 @@ float minsz = 0.0018f;
 float maxbr = 1.00f;
 float minbr = 0.25f;
 
+typedef struct Vertex Vertex;
+struct Vertex {
+	float x, y;
+	float u, v;
+};
+
+typedef struct PVertex PVertex;
+struct PVertex {
+	float x, y;
+	float u, v;
+	float cx, cy;
+	float size, age;
+	float intensity;
+};
+PVertex pverts[6*10000];
+
+#define void_offsetof (void*)(uintptr_t)offsetof
+
+void
+setvbo(void)
+{
+	glBindBuffer(GL_ARRAY_BUFFER, vbo);
+	glEnableVertexAttribArray(0);
+	glEnableVertexAttribArray(1);
+	int stride = sizeof(Vertex);
+        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, stride, 0);
+        glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, stride, void_offsetof(Vertex, u));
+}
+
+void
+setpvbo(void)
+{
+	glBindBuffer(GL_ARRAY_BUFFER, pvbo);
+	glEnableVertexAttribArray(0);
+	glEnableVertexAttribArray(1);
+	glEnableVertexAttribArray(2);
+	glEnableVertexAttribArray(3);
+	int stride = sizeof(PVertex);
+        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, stride, 0);
+        glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, stride, void_offsetof(PVertex, u));
+        glVertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, stride, void_offsetof(PVertex, cx));
+        glVertexAttribPointer(3, 1, GL_FLOAT, GL_FALSE, stride, void_offsetof(PVertex, intensity));
+}
+
+struct {
+	pthread_mutex_t mutex;
+	pthread_cond_t wake;
+	int canprocess, candraw;
+} synch;
+
+void init_synch(void)
+{
+	pthread_mutex_init(&synch.mutex, nil);
+	pthread_cond_init(&synch.wake, nil);
+	synch.canprocess = 1;
+	synch.candraw = 0;
+}
+
+void signal_process(void)
+{
+	pthread_mutex_lock(&synch.mutex);
+	synch.canprocess = 1;
+	pthread_cond_signal(&synch.wake);
+	pthread_mutex_unlock(&synch.mutex);
+}
+
+void wait_canprocess(void)
+{
+	pthread_mutex_lock(&synch.mutex);
+	while(!synch.canprocess)
+		pthread_cond_wait(&synch.wake, &synch.mutex);
+	synch.canprocess = 0;
+	pthread_mutex_unlock(&synch.mutex);
+}
+
+void signal_draw(void)
+{
+	pthread_mutex_lock(&synch.mutex);
+	synch.candraw = 1;
+	pthread_mutex_unlock(&synch.mutex);
+}
+
+int candraw(void)
+{
+	int ret;
+	pthread_mutex_lock(&synch.mutex);
+	ret = synch.candraw;
+	synch.candraw = 0;
+	pthread_mutex_unlock(&synch.mutex);
+	return ret;
+}
+
+uint64 time_now;
+uint64 time_prev;
+
+float
+getDeltaTime(void)
+{
+	time_prev = time_now;
+	time_now = SDL_GetPerformanceCounter();
+	return (float)(time_now-time_prev)/SDL_GetPerformanceFrequency();
+}
+
 void
 draw(void)
 {
 	int w, h;
+
+	float dt = getDeltaTime();
+	float st = simtime/1000000.0f;
+	float rt = (float)realtime/SDL_GetPerformanceFrequency();
+	if(dbgflag)
+		printf("%f %d. %.2f %.2f %.2f\n", dt, npoints, st, rt, rt-st);
+
 	glViewport(0, 0, BWIDTH, BHEIGHT);
 	glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
 
@@ -256,32 +377,40 @@ draw(void)
 	glBindFramebuffer(GL_FRAMEBUFFER, whiteFBO);
 	glClear(GL_COLOR_BUFFER_BIT);
 	glUseProgram(point_program);
-        int coord = glGetUniformLocation(point_program, "coord");
-        int age = glGetUniformLocation(point_program, "age");
-        int intensity = glGetUniformLocation(point_program, "intensity");
 
-	for(int i = 0; i < npoints; i++) {
-		float x = (float)(points[i].x+BORDER)/BWIDTH;
-		float y = (float)(points[i].y+BORDER)/BHEIGHT;
+
+	PVertex *vp = pverts;
+	int i;
+	for(i = 0; i < npoints; i++) {
+		if(vp >= &pverts[nelem(pverts)])
+			break;
+		float x = (points[i].x/1024.0f) + (float)BORDER/BWIDTH;
+		float y = (points[i].y/1024.0f) + (float)BORDER/BHEIGHT;
 // teco uses 3
 // spacewar uses 4
 // DDT uses 7
 		float sz = minsz + (maxsz-minsz)*(points[i].i/7.0f);
 		float br = minbr + (maxbr-minbr)*(points[i].i/7.0f);
 
-//		glUniform3f(coord, x*2-1.0f, y*2-1.0f, 0.005f);
-//		glUniform3f(coord, x*2-1.0f, y*2-1.0f, 0.003f);
-//		glUniform3f(coord, x*2-1.0f, y*2-1.0f, sz);
-
-		glUniform3f(coord, x*2-1.0f, y*2-1.0f, sz);
-		glUniform1f(intensity, br);
-
-//		glUniform3f(coord, x*2-1.0f, y*2-1.0f, sizefoo);
-//		glUniform1f(intensity, intfoo);
-
-		glUniform1f(age, points[i].time/50000.0f);
-		glDrawArrays(GL_TRIANGLES, 0, 6);
+		PVertex *v = vp++;
+		// TODO: could also do that in shader
+		v->cx = x*2.0f-1.0f;
+		v->cy = y*2.0f-1.0f;
+		v->size = sz;
+		v->age = points[i].time/50000.0f;
+		v->intensity = br;
+		memcpy(&(vp++)->cx, &v->cx, sizeof(PVertex)-sizeof(Vertex));
+		memcpy(&(vp++)->cx, &v->cx, sizeof(PVertex)-sizeof(Vertex));
+		memcpy(&(vp++)->cx, &v->cx, sizeof(PVertex)-sizeof(Vertex));
+		memcpy(&(vp++)->cx, &v->cx, sizeof(PVertex)-sizeof(Vertex));
+		memcpy(&(vp++)->cx, &v->cx, sizeof(PVertex)-sizeof(Vertex));
 	}
+// THREAD: signal ready to process
+signal_process();
+	setpvbo();
+	glBufferData(GL_ARRAY_BUFFER, i*6*sizeof(PVertex), pverts, GL_DYNAMIC_DRAW);
+	glDrawArrays(GL_TRIANGLES, 0, i*6);
+
 
 	glBindFramebuffer(GL_FRAMEBUFFER, 0);
 	glDisable(GL_BLEND);
@@ -293,6 +422,7 @@ draw(void)
 
 
 	/* draw and age yellow layer */
+	setvbo();
 	glBindFramebuffer(GL_FRAMEBUFFER, yellowFBO[!flip]);
 	glClear(GL_COLOR_BUFFER_BIT);
 	glUseProgram(excite_program);
@@ -368,14 +498,19 @@ const char *point_vs_src =
 glslheader
 "VSIN vec2 in_pos;\n"
 "VSIN vec2 in_uv;\n"
+"VSIN vec4 in_params1;\n"
+"VSIN float in_params2;\n"
 "VSOUT vec2 v_uv;\n"
 "VSOUT float v_fade;\n"
-"uniform vec3 coord;\n"
-"uniform float age;\n"
-"#define scl coord.z\n"
+"VSOUT float v_intensity;\n"
+"#define coord in_params1.xy\n"
+"#define scl in_params1.z\n"
+"#define age in_params1.w\n"
+"#define intensity in_params2\n"
 "void main()\n"
 "{\n"
 "	v_uv = in_uv;\n"
+"	v_intensity = intensity;\n"
 "	v_fade = pow(0.5, age);\n"
 "	gl_Position = vec4(in_pos.x*scl+coord.x, in_pos.y*scl+coord.y, -0.5, 1.0);\n"
 "}\n";
@@ -385,11 +520,11 @@ glslheader
 outcolor
 "FSIN vec2 v_uv;\n"
 "FSIN float v_fade;\n"
-"uniform float intensity;\n"
+"FSIN float v_intensity;\n"
 "void main()\n"
 "{\n"
 "	float dist = pow(length(v_uv*2.0 - 1.0), 2.0);\n"
-"	float intens = clamp(1.0-dist, 0.0, 1.0)*intensity;\n"
+"	float intens = clamp(1.0-dist, 0.0, 1.0)*v_intensity;\n"
 "	vec4 color = vec4(0);\n"
 "	color.x = intens*v_fade;\n"
 "	color.y = intens;\n"
@@ -481,10 +616,7 @@ initGL(void)
 	glBindTexture(GL_TEXTURE_2D, 0);
 
 
-	struct Vertex {
-		float x, y;
-		float u, v;
-	} screenquad[] = {
+	Vertex screenquad[] = {
 		{ -1.0f, -1.0f,		0.0f, 0.0f },
 		{ 1.0f, -1.0f,		1.0f, 0.0f },
 		{ 1.0f, 1.0f,		1.0f, 1.0f },
@@ -493,17 +625,19 @@ initGL(void)
 		{ 1.0f, 1.0f,		1.0f, 1.0f },
 		{ -1.0f, 1.0f,		0.0f, 1.0f },
 	};
-	GLuint stride = sizeof(struct Vertex);
-//	glGenVertexArrays(1, &vao);
-//	glBindVertexArray(vao);
+	GLuint stride = sizeof(Vertex);
 	glGenBuffers(1, &vbo);
 	glBindBuffer(GL_ARRAY_BUFFER, vbo);
 	glBufferData(GL_ARRAY_BUFFER, sizeof(screenquad), screenquad, GL_STATIC_DRAW);
 
-	glEnableVertexAttribArray(0);
-	glEnableVertexAttribArray(1);
-        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, stride, 0);
-        glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, stride, (void*)(uintptr_t)offsetof(struct Vertex, u));
+
+	stride = sizeof(PVertex);
+	glGenBuffers(1, &pvbo);
+	glBindBuffer(GL_ARRAY_BUFFER, pvbo);
+	// fixed coordinates for the verts, beginning compatible with Vertex
+	for(int i = 0; i < nelem(pverts); i++)
+		memcpy(&pverts[i], &screenquad[i%6], sizeof(Vertex));
+	glBufferData(GL_ARRAY_BUFFER, sizeof(pverts), pverts, GL_DYNAMIC_DRAW);
 }
 
 uint32 screenmodes[2] = { 0, SDL_WINDOW_FULLSCREEN_DESKTOP };
@@ -559,6 +693,7 @@ process(int frmtime)
 	Point *p;
 	int i, n, idx;
 
+//printf("process %d\n", nnewpoints);
 	/* age */
 	n = 0;
 	for(i = 0; i < npoints; i++) {
@@ -595,13 +730,13 @@ void*
 readthread(void *args)
 {
 	uint32 cmd;
+	uint32 cmds[128];
+	int ncmds;
+	int nbytes;
+	int i;
 	uint64 time;
 	uint64 frmtime = 33333;
 	int x, y, intensity, dt;
-
-        SDL_Event ev;
-        SDL_memset(&ev, 0, sizeof(SDL_Event));
-        ev.type = userevent; 
 
 #ifdef SAVELIST
 	static uint32 displist[1024];
@@ -609,8 +744,19 @@ readthread(void *args)
 	FILE *f = fopen("displist.dat", "wb");
 #endif
 
+uint64 realtime_start = SDL_GetPerformanceCounter();
+simtime = 0;
+realtime = realtime_start;
+
 	time = 0;
-        while(readn(netfd, &cmd, 4) == 0){
+for(;;){
+	nbytes = read(netfd, cmds, sizeof(cmds));
+if(nbytes <= 0) break;
+if((nbytes % 4) != 0) printf("yikes %d\n", nbytes), exit(1);
+	ncmds = nbytes/4;
+	for(i = 0; i < ncmds; i++) {
+		cmd = cmds[i];
+//	while(readn(netfd, &cmd, 4) == 0){
 		x = cmd&01777;
 		y = cmd>>10 & 01777;
 		intensity = cmd>>20 & 7;
@@ -638,10 +784,17 @@ if(xxfoo != 8) np->i = xxfoo;
 		// 30fps should be doable
 		if(time > frmtime) {
 			time -= frmtime;
+simtime += frmtime;
+realtime = SDL_GetPerformanceCounter() - realtime_start;
+
+// THREAD: wait here until ready
+wait_canprocess();
 			process(frmtime);
-			SDL_PushEvent(&ev);
+// THREAD: signal ready to draw
+signal_draw();
 		}
 	}
+}
 	exit(0);
 }
 
@@ -665,7 +818,7 @@ updatepen(void)
 void
 usage(void)
 {
-	fprintf(stderr, "usage: %s [-p port] [server]\n", argv0);
+	fprintf(stderr, "usage: %s [-d] [-p port] [server]\n", argv0);
 	exit(0);
 }
 
@@ -681,6 +834,9 @@ main(int argc, char *argv[])
 	ARGBEGIN{
 	case 'p':
 		port = atoi(EARGF(usage()));
+		break;
+	case 'd':
+		dbgflag++;
 		break;
 	}ARGEND;
 
@@ -709,14 +865,15 @@ main(int argc, char *argv[])
 	SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
 	SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
 	SDL_WindowFlags window_flags = (SDL_WindowFlags)(SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
-	window = SDL_CreateWindow("P7 sim", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, BWIDTH, BHEIGHT, window_flags);
+//	window = SDL_CreateWindow("P7 sim", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, BWIDTH, BHEIGHT, window_flags);
+	window = SDL_CreateWindow("P7 sim", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1024+2*BORDER, 1024+2*BORDER, window_flags);
 	if(window == nil) {
 		fprintf(stderr, "can't create window\n");
 		return 1;
 	}
 	SDL_GLContext gl_context = SDL_GL_CreateContext(window);
 	SDL_GL_MakeCurrent(window, gl_context);
-	SDL_GL_SetSwapInterval(1); // Enable vsync
+	SDL_GL_SetSwapInterval(1); // vsynch (1 on, 0 off)
 
 	for(int i = 0; i < 1024*1024; i++)
 		indices[i] = -1;
@@ -727,8 +884,8 @@ main(int argc, char *argv[])
 	initGL();
 
 	SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "linear");
-        userevent = SDL_RegisterEvents(1);
 
+	init_synch();
 	pthread_create(&th, nil, readthread, nil);
 
 	running = 1;
@@ -736,10 +893,8 @@ main(int argc, char *argv[])
 		while(SDL_PollEvent(&event)) {
 			switch(event.type) {
 			case SDL_TEXTINPUT:
-//				textinput(event.text.text);
 				break;
 			case SDL_KEYDOWN:
-//				keydown(event.key.keysym, event.key.repeat);
 				keydown(event.key.keysym);
 				break;
 			case SDL_KEYUP:
@@ -767,10 +922,6 @@ main(int argc, char *argv[])
 				running = 0;
 				break;
 
-			case SDL_USEREVENT:
-				draw();
-				break;
-
 			case SDL_WINDOWEVENT:
 				switch(event.window.event){
 				case SDL_WINDOWEVENT_CLOSE:
@@ -788,6 +939,11 @@ main(int argc, char *argv[])
 				}
 			}
 		}
+
+// THREAD: check for ready to draw, then draw
+if(candraw())
+	draw();
+//SDL_Delay(1);
 //usleep(30000);
 	}
 
