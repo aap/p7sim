@@ -887,6 +887,8 @@ main(int argc, char *argv[])
 
 	init_synch();
 	pthread_create(&th, nil, readthread, nil);
+	int cursortimer = 0;
+	SDL_ShowCursor(SDL_DISABLE);
 
 	running = 1;
 	while(running){
@@ -902,6 +904,8 @@ main(int argc, char *argv[])
 				break;
 
 			case SDL_MOUSEMOTION:
+				SDL_ShowCursor(SDL_ENABLE);
+				cursortimer = 50;
 				penx = event.motion.x;
 				peny = event.motion.y;
 				if(pendown)
@@ -941,8 +945,11 @@ main(int argc, char *argv[])
 		}
 
 // THREAD: check for ready to draw, then draw
-if(candraw())
-	draw();
+		if(candraw()) {
+			draw();
+			if(cursortimer > 0 && --cursortimer == 0)
+				SDL_ShowCursor(SDL_DISABLE);
+		}
 //SDL_Delay(1);
 //usleep(30000);
 	}
